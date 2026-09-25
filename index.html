@@ -9,17 +9,23 @@
     <script src="https://js.jotform.com/JotFormCustomWidget.min.js"></script>
 
     <style>
-        body {
-            margin: 0;
-            padding: 10px;
-            font-family: Arial, sans-serif;
+        * {
+            box-sizing: border-box;
         }
 
-        .speed-box {
-            border: 1px solid #ddd;
-            border-radius: 10px;
+        body {
+            margin: 0;
             padding: 15px;
-            background: #fff;
+            font-family: Arial, sans-serif;
+            background: #ffffff;
+            color: #222222;
+        }
+
+        .container {
+            width: 100%;
+            max-width: 400px;
+            margin: 0 auto;
+            text-align: center;
         }
 
         .title {
@@ -29,56 +35,364 @@
         }
 
         .status {
+            padding: 10px;
+            border-radius: 6px;
+            background: #f1f1f1;
             font-size: 14px;
-            color: #555;
+            margin-bottom: 12px;
+        }
+
+        .speed {
+            font-size: 32px;
+            font-weight: bold;
+            margin: 10px 0;
+        }
+
+        .unit {
+            font-size: 14px;
+            color: #666666;
+        }
+
+        .details {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 8px;
+            margin-top: 12px;
+        }
+
+        .detail {
+            background: #f7f7f7;
+            border-radius: 6px;
+            padding: 8px;
+            font-size: 12px;
+        }
+
+        .detail strong {
+            display: block;
+            font-size: 14px;
+            margin-top: 3px;
+        }
+
+        .permission {
+            color: #b00020;
+            font-size: 13px;
+            line-height: 1.4;
         }
     </style>
 </head>
 
 <body>
 
-<div class="speed-box">
+<div class="container">
 
     <div class="title">
-        🚍 Vehicle Speed Monitor
+        🚍 Automatic Vehicle Speed Measurement
     </div>
 
-    <div class="status" id="status">
-        Loading...
+    <div id="status" class="status">
+        Starting GPS measurement...
     </div>
+
+    <div class="speed">
+        <span id="currentSpeed">0.0</span>
+        <span class="unit">km/h</span>
+    </div>
+
+    <div class="details">
+
+        <div class="detail">
+            Average Speed
+            <strong id="averageSpeed">0.0 km/h</strong>
+        </div>
+
+        <div class="detail">
+            Maximum Speed
+            <strong id="maximumSpeed">0.0 km/h</strong>
+        </div>
+
+        <div class="detail">
+            Duration
+            <strong id="duration">0 sec</strong>
+        </div>
+
+        <div class="detail">
+            GPS Accuracy
+            <strong id="accuracy">-- m</strong>
+        </div>
+
+        <div class="detail">
+            GPS Readings
+            <strong id="readings">0</strong>
+        </div>
+
+        <div class="detail">
+            Distance
+            <strong id="distance">0 m</strong>
+        </div>
+
+    </div>
+
+    <div id="permissionMessage" class="permission"></div>
 
 </div>
 
+
 <script>
 
-JFCustomWidget.subscribe("ready", function() {
+"use strict";
 
-    console.log("Vehicle Speed Monitor: READY");
+/*
+===========================================================
+ VEHICLE SPEED MONITOR
+ Production Version
+===========================================================
 
-    document.getElementById("status").textContent =
-        "GPS component ready";
+ Measures vehicle speed using browser GPS.
 
-});
+ Output JSON:
+
+ {
+   estimatedAverage: number,
+   estimatedMaximum: number,
+   speedMeasurement: number,
+   gpsAccuracy: number,
+   gpsReadings: number,
+   speedMeasurement70: string
+ }
+
+===========================================================
+*/
 
 
-JFCustomWidget.subscribe("submit", function() {
+/* ========================================================
+   SETTINGS
+======================================================== */
 
-    console.log("Vehicle Speed Monitor: SUBMIT");
+const SETTINGS = {
+
+    // Ignore GPS readings worse than this
+    maximumAccuracyMeters: 50,
+
+    // Reject physically impossible GPS jumps
+    maximumAllowedSpeedKmh: 180,
+
+    // Ignore tiny GPS movements
+    minimumDistanceMeters: 2,
+
+    // Minimum time between accepted readings
+    minimumTimeSeconds: 1,
+
+    // Minimum movement required before calculating speed
+    minimumMovementMeters: 2
+
+};
+
+
+/* ========================================================
+   VARIABLES
+======================================================== */
+
+let watchId = null;
+
+let measurementStarted = false;
+let measurementFinished = false;
+
+let startTime = null;
+let lastAcceptedTime = null;
+
+let totalDistanceMeters = 0;
+
+let acceptedReadings = 0;
+
+let maximumSpeedKmh = 0;
+let currentSpeedKmh = 0;
+
+let lastPosition = null;
+
+let latestAccuracy = null;
+
+let measurementStatus = "Starting";
+
+
+/* ========================================================
+   HAVERSINE DISTANCE
+======================================================== */
+
+function calculateDistanceMeters(lat1, lon1, lat2, lon2) {
+
+    const earthRadius = 6371000;
+
+    const lat1Rad = lat1 * Math.PI / 180;
+    const lat2Rad = lat2 * Math.PI / 180;
+
+    const deltaLat =
+        (lat2 - lat1) * Math.PI / 180;
+
+    const deltaLon =
+        (lon2 - lon1) * Math.PI / 180;
+
+    const a =
+        Math.sin(deltaLat / 2) *
+        Math.sin(deltaLat / 2) +
+
+        Math.cos(lat1Rad) *
+        Math.cos(lat2Rad) *
+
+        Math.sin(deltaLon / 2) *
+        Math.sin(deltaLon / 2);
+
+    const c =
+        2 * Math.atan2(
+            Math.sqrt(a),
+            Math.sqrt(1 - a)
+        );
+
+    return earthRadius * c;
+}
+
+
+/* ========================================================
+   ROUND NUMBER
+======================================================== */
+
+function roundNumber(value, decimals = 1) {
+
+    const multiplier =
+        Math.pow(10, decimals);
+
+    return Math.round(
+        value * multiplier
+    ) / multiplier;
+}
+
+
+/* ========================================================
+   UPDATE SCREEN
+======================================================== */
+
+function updateUI() {
+
+    let durationSeconds = 0;
+
+    if (startTime) {
+
+        durationSeconds =
+            (Date.now() - startTime) / 1000;
+
+    }
+
+    let averageSpeedKmh = 0;
+
+    if (durationSeconds > 0) {
+
+        averageSpeedKmh =
+            (totalDistanceMeters / 1000) /
+            (durationSeconds / 3600);
+
+    }
+
+    document.getElementById("currentSpeed")
+        .textContent =
+        roundNumber(currentSpeedKmh, 1);
+
+    document.getElementById("averageSpeed")
+        .textContent =
+        roundNumber(averageSpeedKmh, 1)
+        + " km/h";
+
+    document.getElementById("maximumSpeed")
+        .textContent =
+        roundNumber(maximumSpeedKmh, 1)
+        + " km/h";
+
+    document.getElementById("duration")
+        .textContent =
+        Math.round(durationSeconds)
+        + " sec";
+
+    document.getElementById("accuracy")
+        .textContent =
+        latestAccuracy !== null
+            ? roundNumber(latestAccuracy, 1) + " m"
+            : "-- m";
+
+    document.getElementById("readings")
+        .textContent =
+        acceptedReadings;
+
+    document.getElementById("distance")
+        .textContent =
+        totalDistanceMeters >= 1000
+            ? roundNumber(totalDistanceMeters / 1000, 2) + " km"
+            : Math.round(totalDistanceMeters) + " m";
+
+}
+
+
+/* ========================================================
+   UPDATE JOTFORM WIDGET VALUE
+======================================================== */
+
+function sendCurrentData() {
+
+    let durationSeconds = 0;
+
+    if (startTime) {
+
+        durationSeconds =
+            (Date.now() - startTime) / 1000;
+
+    }
+
+    let averageSpeedKmh = 0;
+
+    if (durationSeconds > 0) {
+
+        averageSpeedKmh =
+            (totalDistanceMeters / 1000) /
+            (durationSeconds / 3600);
+
+    }
 
     const result = {
-        status: "Test successful",
-        averageSpeed: 0,
-        maximumSpeed: 0,
-        durationSeconds: 0,
-        gpsAccuracy: null,
-        readingsUsed: 0
+
+        estimatedAverage:
+            roundNumber(averageSpeedKmh, 1),
+
+        estimatedMaximum:
+            roundNumber(maximumSpeedKmh, 1),
+
+        speedMeasurement:
+            Math.round(durationSeconds),
+
+        gpsAccuracy:
+            latestAccuracy !== null
+                ? roundNumber(latestAccuracy, 1)
+                : null,
+
+        gpsReadings:
+            acceptedReadings,
+
+        speedMeasurement70:
+            measurementStatus,
+
+        totalDistanceMeters:
+            Math.round(totalDistanceMeters * 10) / 10,
+
+        currentSpeed:
+            roundNumber(currentSpeedKmh, 1)
+
     };
 
-    /*
-     * Tell Jotform that the widget has completed.
-     */
 
-    JFCustomWidget.sendSubmit({
+    /*
+       Keep the widget value updated.
+
+       Jotform accepts the value as a string,
+       so JSON.stringify is used.
+    */
+
+    JFCustomWidget.sendData({
 
         valid: true,
 
@@ -86,7 +400,562 @@ JFCustomWidget.subscribe("submit", function() {
 
     });
 
-});
+}
+
+
+/* ========================================================
+   GPS SUCCESS
+======================================================== */
+
+function handlePosition(position) {
+
+    if (measurementFinished) {
+        return;
+    }
+
+
+    const latitude =
+        position.coords.latitude;
+
+    const longitude =
+        position.coords.longitude;
+
+    const accuracy =
+        position.coords.accuracy;
+
+
+    latestAccuracy = accuracy;
+
+
+    /*
+       Reject poor GPS accuracy.
+    */
+
+    if (
+        !Number.isFinite(accuracy) ||
+        accuracy > SETTINGS.maximumAccuracyMeters
+    ) {
+
+        measurementStatus =
+            "Waiting for accurate GPS";
+
+        document.getElementById("status")
+            .textContent =
+            "Waiting for accurate GPS...";
+
+        updateUI();
+
+        return;
+
+    }
+
+
+    const now =
+        Date.now();
+
+
+    /*
+       First valid reading.
+    */
+
+    if (!measurementStarted) {
+
+        measurementStarted = true;
+
+        startTime = now;
+
+        lastAcceptedTime = now;
+
+        lastPosition = {
+
+            latitude: latitude,
+            longitude: longitude
+
+        };
+
+        acceptedReadings = 1;
+
+        measurementStatus =
+            "Measuring";
+
+        document.getElementById("status")
+            .textContent =
+            "GPS measurement active";
+
+        updateUI();
+
+        sendCurrentData();
+
+        return;
+
+    }
+
+
+    /*
+       Time since previous accepted reading.
+    */
+
+    const elapsedSeconds =
+        (now - lastAcceptedTime) / 1000;
+
+
+    if (
+        elapsedSeconds <
+        SETTINGS.minimumTimeSeconds
+    ) {
+
+        return;
+
+    }
+
+
+    /*
+       Calculate distance.
+    */
+
+    const distance =
+        calculateDistanceMeters(
+            lastPosition.latitude,
+            lastPosition.longitude,
+            latitude,
+            longitude
+        );
+
+
+    /*
+       Ignore tiny GPS movements.
+    */
+
+    if (
+        distance <
+        SETTINGS.minimumDistanceMeters
+    ) {
+
+        return;
+
+    }
+
+
+    /*
+       Calculate instantaneous speed.
+    */
+
+    const speedKmh =
+        (distance / 1000) /
+        (elapsedSeconds / 3600);
+
+
+    /*
+       Reject impossible GPS jumps.
+    */
+
+    if (
+        speedKmh >
+        SETTINGS.maximumAllowedSpeedKmh
+    ) {
+
+        console.warn(
+            "Rejected GPS jump:",
+            speedKmh,
+            "km/h"
+        );
+
+        return;
+
+    }
+
+
+    /*
+       Accept reading.
+    */
+
+    totalDistanceMeters += distance;
+
+    currentSpeedKmh =
+        speedKmh;
+
+    if (
+        speedKmh >
+        maximumSpeedKmh
+    ) {
+
+        maximumSpeedKmh =
+            speedKmh;
+
+    }
+
+
+    acceptedReadings++;
+
+    lastAcceptedTime =
+        now;
+
+    lastPosition = {
+
+        latitude: latitude,
+        longitude: longitude
+
+    };
+
+    measurementStatus =
+        "Measuring";
+
+
+    document.getElementById("status")
+        .textContent =
+        "GPS measurement active";
+
+
+    updateUI();
+
+    sendCurrentData();
+
+}
+
+
+/* ========================================================
+   GPS ERROR
+======================================================== */
+
+function handlePositionError(error) {
+
+    if (measurementFinished) {
+        return;
+    }
+
+
+    console.warn(
+        "GPS error:",
+        error.code,
+        error.message
+    );
+
+
+    switch (error.code) {
+
+        case 1:
+
+            measurementStatus =
+                "Location permission denied";
+
+            document.getElementById("status")
+                .textContent =
+                "Location permission is required";
+
+            document.getElementById("permissionMessage")
+                .textContent =
+                "Please allow location access in your browser so vehicle speed can be estimated.";
+
+            break;
+
+
+        case 2:
+
+            measurementStatus =
+                "GPS unavailable";
+
+            document.getElementById("status")
+                .textContent =
+                "GPS signal unavailable";
+
+            break;
+
+
+        case 3:
+
+            measurementStatus =
+                "GPS timeout";
+
+            document.getElementById("status")
+                .textContent =
+                "Waiting for GPS signal...";
+
+            break;
+
+
+        default:
+
+            measurementStatus =
+                "GPS error";
+
+            document.getElementById("status")
+                .textContent =
+                "Unable to obtain GPS location";
+
+    }
+
+
+    updateUI();
+
+    sendCurrentData();
+
+}
+
+
+/* ========================================================
+   START GPS
+======================================================== */
+
+function startGPS() {
+
+    if (!navigator.geolocation) {
+
+        measurementStatus =
+            "GPS not supported";
+
+        document.getElementById("status")
+            .textContent =
+            "GPS is not supported on this device";
+
+        sendCurrentData();
+
+        return;
+
+    }
+
+
+    measurementStatus =
+        "Requesting location";
+
+
+    document.getElementById("status")
+        .textContent =
+        "Requesting GPS location...";
+
+
+    /*
+       Start continuous GPS tracking.
+    */
+
+    watchId =
+        navigator.geolocation.watchPosition(
+
+            handlePosition,
+
+            handlePositionError,
+
+            {
+
+                enableHighAccuracy: true,
+
+                maximumAge: 1000,
+
+                timeout: 15000
+
+            }
+
+        );
+
+}
+
+
+/* ========================================================
+   STOP GPS
+======================================================== */
+
+function stopGPS() {
+
+    if (watchId !== null) {
+
+        navigator.geolocation.clearWatch(
+            watchId
+        );
+
+        watchId = null;
+
+    }
+
+}
+
+
+/* ========================================================
+   FINAL RESULT
+======================================================== */
+
+function getFinalResult() {
+
+    let durationSeconds = 0;
+
+
+    if (startTime) {
+
+        durationSeconds =
+            (Date.now() - startTime) / 1000;
+
+    }
+
+
+    let averageSpeedKmh = 0;
+
+
+    if (durationSeconds > 0) {
+
+        averageSpeedKmh =
+            (totalDistanceMeters / 1000) /
+            (durationSeconds / 3600);
+
+    }
+
+
+    /*
+       If we have no valid GPS readings,
+       report that clearly.
+    */
+
+    if (acceptedReadings < 2) {
+
+        measurementStatus =
+            "Insufficient GPS data";
+
+    }
+
+    else if (
+        measurementStatus ===
+        "Measuring"
+    ) {
+
+        measurementStatus =
+            "Completed";
+
+    }
+
+
+    return {
+
+        estimatedAverage:
+            roundNumber(
+                averageSpeedKmh,
+                1
+            ),
+
+        estimatedMaximum:
+            roundNumber(
+                maximumSpeedKmh,
+                1
+            ),
+
+        speedMeasurement:
+            Math.round(
+                durationSeconds
+            ),
+
+        gpsAccuracy:
+            latestAccuracy !== null
+                ? roundNumber(
+                    latestAccuracy,
+                    1
+                )
+                : null,
+
+        gpsReadings:
+            acceptedReadings,
+
+        speedMeasurement70:
+            measurementStatus,
+
+        totalDistanceMeters:
+            roundNumber(
+                totalDistanceMeters,
+                1
+            ),
+
+        currentSpeed:
+            roundNumber(
+                currentSpeedKmh,
+                1
+            )
+
+    };
+
+}
+
+
+/* ========================================================
+   JOTFORM READY
+======================================================== */
+
+JFCustomWidget.subscribe(
+    "ready",
+    function() {
+
+        /*
+           Important:
+           GPS starts automatically.
+           There is NO Start button.
+        */
+
+        startGPS();
+
+
+        /*
+           Update display every second.
+        */
+
+        setInterval(
+            function() {
+
+                updateUI();
+
+            },
+            1000
+        );
+
+    }
+);
+
+
+/* ========================================================
+   JOTFORM SUBMIT
+======================================================== */
+
+JFCustomWidget.subscribe(
+    "submit",
+    function() {
+
+        /*
+           Prevent duplicate submissions.
+        */
+
+        if (measurementFinished) {
+
+            return;
+
+        }
+
+
+        measurementFinished = true;
+
+
+        /*
+           Stop GPS tracking.
+        */
+
+        stopGPS();
+
+
+        /*
+           Calculate final result.
+        */
+
+        const result =
+            getFinalResult();
+
+
+        /*
+           Send final result to Jotform.
+        */
+
+        JFCustomWidget.sendSubmit({
+
+            valid: true,
+
+            value:
+                JSON.stringify(result)
+
+        });
+
+    }
+);
 
 </script>
 
