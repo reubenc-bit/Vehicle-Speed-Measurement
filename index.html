@@ -213,6 +213,18 @@ let latestAccuracy = null;
 
 let measurementStatus = "Starting";
 
+// Statuses that already describe a specific terminal
+// condition (permission, hardware, timeout, etc). If we
+// land here with too few readings, keep this status instead
+// of overwriting it with a generic "Insufficient GPS data".
+const TERMINAL_STATUSES = [
+    "Location permission denied",
+    "GPS unavailable",
+    "GPS timeout",
+    "GPS not supported",
+    "GPS error"
+];
+
 
 /* ========================================================
    HAVERSINE DISTANCE
@@ -799,13 +811,20 @@ function getFinalResult() {
 
     /*
        If we have no valid GPS readings,
-       report that clearly.
+       report that clearly — but don't clobber
+       a more specific terminal status (permission
+       denied, GPS unavailable, timeout, etc) that
+       was already set by handlePositionError().
     */
 
     if (acceptedReadings < 2) {
 
-        measurementStatus =
-            "Insufficient GPS data";
+        if (!TERMINAL_STATUSES.includes(measurementStatus)) {
+
+            measurementStatus =
+                "Insufficient GPS data";
+
+        }
 
     }
 
